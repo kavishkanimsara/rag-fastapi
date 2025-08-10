@@ -10,8 +10,11 @@ from langchain_chroma import Chroma
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langchain_community.vectorstores.utils import filter_complex_metadata
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
 import tiktoken
 from dotenv import load_dotenv
+import tempfile
+import shutil
 
 load_dotenv()
 
@@ -118,46 +121,6 @@ class EnhancedQueryResponse(BaseModel):
 items_db = []
 item_id_counter = 1
 
-def enhance_query(query: str) -> str:
-    """Enhance the user query for better search results"""
-    # Simple query enhancement logic
-    enhanced_terms = []
-    
-    # Add common synonyms and related terms for any type of content
-    synonyms = {
-        "climate": ["weather", "temperature", "rainfall", "monsoon", "seasonal", "atmospheric"],
-        "food": ["cuisine", "dishes", "cooking", "recipes", "traditional food", "culinary"],
-        "culture": ["traditions", "customs", "heritage", "festivals", "religion", "society"],
-        "economy": ["business", "trade", "industries", "exports", "economic", "financial"],
-        "geography": ["location", "terrain", "landscape", "mountains", "coast", "physical"],
-        "history": ["historical", "ancient", "past", "heritage", "civilization", "events"],
-        "language": ["languages", "speaking", "communication", "dialects", "linguistic"],
-        "wildlife": ["animals", "nature", "biodiversity", "parks", "conservation", "fauna"],
-        "technology": ["tech", "digital", "software", "hardware", "innovation", "computing"],
-        "science": ["scientific", "research", "experiments", "discoveries", "methodology"],
-        "health": ["medical", "healthcare", "wellness", "medicine", "treatment", "disease"],
-        "education": ["learning", "teaching", "academic", "school", "university", "training"],
-        "politics": ["government", "political", "policy", "elections", "democracy", "leadership"],
-        "sports": ["athletics", "games", "competition", "fitness", "recreation", "olympics"],
-        "art": ["artistic", "creative", "painting", "sculpture", "music", "literature"],
-        "architecture": ["buildings", "design", "construction", "structures", "urban planning"],
-        "transportation": ["travel", "vehicles", "infrastructure", "mobility", "logistics"],
-        "environment": ["ecological", "sustainability", "pollution", "conservation", "climate change"],
-        "social": ["society", "community", "relationships", "social issues", "demographics"],
-        "business": ["corporate", "commerce", "enterprise", "management", "marketing"]
-    }
-    
-    query_lower = query.lower()
-    for term, related in synonyms.items():
-        if term in query_lower:
-            enhanced_terms.extend(related[:2])  # Add top 2 related terms
-    
-    if enhanced_terms:
-        enhanced_query = f"{query} {' '.join(enhanced_terms)}"
-        return enhanced_query
-    
-    return query
-
 def classify_query(query: str) -> str:
     """Classify the type of query"""
     query_lower = query.lower()
@@ -205,86 +168,57 @@ Key information:
     return analysis
 
 # RAG Endpoints
-@app.post("/documents", response_model=Dict[str, Any])
-async def add_document(document: DocumentRequest):
-    """Add a document to the vector database with enhanced metadata"""
+@app.post("/upload-document")
+async def upload_document(file: UploadFile = File(...)):
+    """Upload and process a document (PDF or text) to the vector database"""
     try:
-        # Split the document into chunks
-        chunks = text_splitter.split_text(document.content)
+        # Check file type
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
         
-        # Enhanced metadata
-        enhanced_metadata = document.metadata or {}
-        enhanced_metadata.update({
-            "title": document.title or "Untitled",
-            "category": document.category or "general",
-            "chunk_count": len(chunks),
-            "total_length": len(document.content)
-        })
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in ['.txt', '.pdf']:
+            raise HTTPException(status_code=400, detail="Only .txt and .pdf files are supported")
         
-        # Create Document objects with metadata
-        documents = [Document(page_content=chunk, metadata=enhanced_metadata) for chunk in chunks]
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            shutil.copyfileobj(file.file, temp_file)
+            temp_path = temp_file.name
         
-        # Filter complex metadata
-        filtered_documents = filter_complex_metadata(documents)
-        
-        # Add chunks to ChromaDB using LangChain
-        vectorstore.add_documents(filtered_documents)
-        
-        return {
-            "message": f"Document added successfully with {len(chunks)} chunks",
-            "chunks_created": len(chunks),
-            "metadata": enhanced_metadata
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error adding document: {str(e)}")
-
-@app.post("/query", response_model=EnhancedQueryResponse)
-async def query_documents(query_request: QueryRequest):
-    """Simple query endpoint that returns clear, direct answers"""
-    try:
-        # Classify query
-        query_category = classify_query(query_request.query)
-        
-        # Use LangChain's similarity search with original query
-        docs_and_scores = vectorstore.similarity_search_with_score(
-            query_request.query,
-            k=query_request.n_results
-        )
-        
-        documents = []
-        for doc, score in docs_and_scores:
-            relevance_score = calculate_relevance_score(score)
-            doc_response = DocumentResponse(
-                id=str(hash(doc.page_content))[:8],
-                content=doc.page_content,
-                metadata=doc.metadata,
-                distance=float(score) if score is not None else None,
-                relevance_score=relevance_score
-            )
-            documents.append(doc_response)
-        
-        # Generate simple analysis if requested
-        analysis = None
-        if query_request.include_analysis:
-            analysis = analyze_context(query_request.query, documents)
-        
-        return EnhancedQueryResponse(
-            original_query=query_request.query,
-            enhanced_query=None,  # No enhancement
-            query_category=query_category,
-            documents=documents,
-            analysis=analysis,
-            total_results=len(documents),
-            search_metadata={
-                "query_enhanced": False,
-                "analysis_included": query_request.include_analysis,
-                "search_strategy": "similarity_search_with_score"
+        try:
+            # Load document based on type
+            if file_ext == '.pdf':
+                loader = PyPDFLoader(temp_path)
+                docs = loader.load()
+            else:  # .txt
+                loader = TextLoader(temp_path, encoding="utf-8")
+                docs = loader.load()
+            
+            # Split into chunks
+            chunks = text_splitter.split_documents(docs)
+            
+            # Filter complex metadata
+            filtered_chunks = filter_complex_metadata(chunks)
+            
+            # Add to vectorstore
+            vectorstore.add_documents(filtered_chunks)
+            
+            return {
+                "message": f"Document '{file.filename}' processed successfully",
+                "chunks_created": len(chunks),
+                "file_type": file_ext,
+                "file_size": len(chunks) * 500  # Approximate size
             }
-        )
+            
+        finally:
+            # Clean up temporary file
+            os.unlink(temp_path)
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error querying documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
 
-@app.post("/simple-query")
+
+@app.post("/query")
 async def simple_query(query_request: QueryRequest):
     """Simple query endpoint that uses Gemini LLM to enhance responses"""
     try:
@@ -375,6 +309,7 @@ async def simple_query(query_request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error querying documents: {str(e)}")
 
+
 @app.get("/documents", response_model=Dict[str, Any])
 async def list_documents():
     """List all documents in the vector database with enhanced information"""
@@ -387,11 +322,15 @@ async def list_documents():
         
         documents = []
         for i, doc in enumerate(all_docs['documents']):
+            metadata = all_docs['metadatas'][i] if 'metadatas' in all_docs else {}
+            source_type = metadata.get('source_type', 'unknown')
+            
             doc_info = {
                 "id": all_docs['ids'][i] if 'ids' in all_docs else f"doc_{i}",
                 "content": doc[:200] + "..." if len(doc) > 200 else doc,
-                "metadata": all_docs['metadatas'][i] if 'metadatas' in all_docs else None,
-                "length": len(doc)
+                "metadata": metadata,
+                "length": len(doc),
+                "source_type": source_type
             }
             documents.append(doc_info)
         

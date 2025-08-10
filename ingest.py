@@ -3,7 +3,7 @@ import glob
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_community.vectorstores.utils import filter_complex_metadata
 from dotenv import load_dotenv
 
@@ -29,11 +29,26 @@ else:
         google_api_key=os.getenv("GOOGLE_API_KEY")
     )
 
-# 1. Load the data
+# 1. Load the data - support both PDF and text files
 docs = []
-for file in glob.glob("data/*.txt"):
-    loader = TextLoader(file, encoding="utf-8")
-    docs.extend(loader.load())
+supported_extensions = ['.txt', '.pdf']
+
+print("Loading documents...")
+for file in glob.glob("data/*.*"):
+    file_ext = os.path.splitext(file)[1].lower()
+    if file_ext in supported_extensions:
+        try:
+            if file_ext == '.pdf':
+                print(f"Loading PDF: {file}")
+                loader = PyPDFLoader(file)
+                docs.extend(loader.load())
+            elif file_ext == '.txt':
+                print(f"Loading text: {file}")
+                loader = TextLoader(file, encoding="utf-8")
+                docs.extend(loader.load())
+        except Exception as e:
+            print(f"Error loading {file}: {e}")
+            continue
 
 print(f"Loaded {len(docs)} documents.")
 

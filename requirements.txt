@@ -7,4 +7,6 @@ tiktoken
 langchain-google-genai
 langchain-community
 python-dotenv
-google-generativeai 
+google-generativeai
+PyPDF2
+pypdf 
