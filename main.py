@@ -5,10 +5,11 @@ import os
 import json
 import re
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_chroma import Chroma
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
+from langchain_community.vectorstores.utils import filter_complex_metadata
 import tiktoken
 from dotenv import load_dotenv
 
@@ -203,25 +204,6 @@ Key information:
     
     return analysis
 
-@app.get("/")
-async def root():
-    return {
-        "message": "Welcome to Enhanced RAG FastAPI App!", 
-        "status": "running",
-        "features": [
-            "Enhanced query processing",
-            "Context-aware responses", 
-            "Query classification",
-            "Relevance scoring",
-            "Document analysis",
-            "Universal document support"
-        ]
-    }
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "service": "rag-fastapi", "version": "2.0.0"}
-
 # RAG Endpoints
 @app.post("/documents", response_model=Dict[str, Any])
 async def add_document(document: DocumentRequest):
@@ -239,11 +221,14 @@ async def add_document(document: DocumentRequest):
             "total_length": len(document.content)
         })
         
+        # Create Document objects with metadata
+        documents = [Document(page_content=chunk, metadata=enhanced_metadata) for chunk in chunks]
+        
+        # Filter complex metadata
+        filtered_documents = filter_complex_metadata(documents)
+        
         # Add chunks to ChromaDB using LangChain
-        vectorstore.add_texts(
-            texts=chunks,
-            metadatas=[enhanced_metadata for _ in chunks]
-        )
+        vectorstore.add_documents(filtered_documents)
         
         return {
             "message": f"Document added successfully with {len(chunks)} chunks",
@@ -296,6 +281,97 @@ async def query_documents(query_request: QueryRequest):
                 "search_strategy": "similarity_search_with_score"
             }
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error querying documents: {str(e)}")
+
+@app.post("/simple-query")
+async def simple_query(query_request: QueryRequest):
+    """Simple query endpoint that uses Gemini LLM to enhance responses"""
+    try:
+        # Use LangChain's similarity search with more results to find relevant chunks
+        docs_and_scores = vectorstore.similarity_search_with_score(
+            query_request.query,
+            k=10  # Get more results to find the right chunk
+        )
+        
+        if not docs_and_scores:
+            return {"answer": "I couldn't find any information about that in my knowledge base."}
+        
+        # Get the most relevant documents
+        relevant_docs = []
+        for doc, score in docs_and_scores[:3]:  # Top 3 most relevant
+            relevant_docs.append({
+                "content": doc.page_content,
+                "relevance_score": calculate_relevance_score(score)
+            })
+        
+        # Use Gemini LLM to generate enhanced response
+        try:
+            if os.getenv("GOOGLE_API_KEY"):
+                # Initialize Gemini LLM
+                llm = ChatGoogleGenerativeAI(
+                    model="gemini-1.5-flash",
+                    google_api_key=os.getenv("GOOGLE_API_KEY"),
+                    temperature=0.3
+                )
+                
+                # Create context from relevant documents
+                context = "\n\n".join([f"Document {i+1} (Relevance: {doc['relevance_score']:.2f}):\n{doc['content']}" 
+                                     for i, doc in enumerate(relevant_docs)])
+                
+                # Create prompt for Gemini
+                prompt = f"""
+                Based on the following documents, provide a clear and accurate answer to the user's question.
+                
+                User Question: {query_request.query}
+                
+                Relevant Documents:
+                {context}
+                
+                Instructions:
+                - Answer the question using ONLY the information from the provided documents
+                - Be concise and short answers
+                - If the documents don't contain enough information to answer the question, say so
+                - Focus on the most relevant information from the documents
+                - Don't add external knowledge or assumptions
+                
+                Answer:"""
+                
+                # Generate response using Gemini
+                response = llm.invoke(prompt)
+                enhanced_answer = response.content.strip()
+                
+                return {"answer": enhanced_answer}
+                
+            else:
+                # Fallback to simple response if no API key
+                best_doc = relevant_docs[0]
+                content = best_doc["content"]
+                
+                if len(content) > 200:
+                    answer = content[:200].strip()
+                    if not answer.endswith(('.', '!', '?')):
+                        answer += "..."
+                else:
+                    answer = content.strip()
+                
+                return {"answer": answer}
+                
+        except Exception as llm_error:
+            # Fallback if LLM fails
+            print(f"LLM error: {llm_error}")
+            best_doc = relevant_docs[0]
+            content = best_doc["content"]
+            
+            if len(content) > 200:
+                answer = content[:200].strip()
+                if not answer.endswith(('.', '!', '?')):
+                    answer += "..."
+            else:
+                answer = content.strip()
+            
+            return {"answer": answer}
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error querying documents: {str(e)}")
 

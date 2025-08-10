@@ -35,6 +35,18 @@ data/*.txt
 !data/sample.txt
 !data/example_document.txt
 
+#gitignore chorma_db
+chroma_db/
+
+#gitignore data
+data/
+
+#gitignore logs
+logs/
+
+#gitignore _pycache_
+__pycache__/
+
 # Logs
 *.log
 logs/
